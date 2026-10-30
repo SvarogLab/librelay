@@ -135,7 +135,7 @@ mod tests {
 
     #[tokio::test]
     async fn died_reports_the_transport_ending() {
-        let mut child = spawn("sleep 30");
+        let mut child = spawn("exec sleep 30");
         let died = tokio::time::timeout(Duration::from_secs(5), died(&mut child, async {}))
             .await
             .expect("died() did not resolve after the transport ended");
@@ -180,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_server_that_stays_up_is_alive() {
-        let mut child = spawn("sleep 30");
+        let mut child = spawn("exec sleep 30");
         wait_alive(&mut child, Duration::from_millis(100))
             .await
             .unwrap();

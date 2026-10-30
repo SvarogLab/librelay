@@ -19,14 +19,15 @@ into `clippy.toml` only with a comment naming the code it is for.
 - `client` is the Linux side and gated on `unix`; `server` is the Windows side; `mux` is what both
   share, implied by either.
 - Tests sit in a `tests` module at the bottom of the file they test, or in `name/tests.rs` when they
-  outgrow it.
+  outgrow it. A test that drives the crate only from outside, through its public API or its built
+  binary, goes in `tests/`.
 
 ## Naming
 
 Types and functions say what they are in the relay: the `client` runs on Linux, the `server` is
 the Windows process it spawns, the `mux` the yamux connection between them over the server's
-stdio, and a `stream` one unit of work carried over it. Test names are sentences stating the behavior they
-hold.
+stdio, and a `stream` one unit of work carried over it. Test names are sentences stating the
+behavior they hold.
 
 ## Errors
 

@@ -111,3 +111,26 @@ async fn serve_returns_when_the_client_vanishes_without_closing() {
         .ok();
     drop(stalled_tx);
 }
+
+/// A connection that closes without sending anything — a health check's connect-and-close, say —
+/// still has to end on both sides, or each one leaves a task and a stream behind for good.
+#[tokio::test]
+async fn a_stream_closed_before_any_data_still_ends() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (handle, client_driver) = client::mux::client(client_io);
+    tokio::spawn(client_driver);
+    tokio::spawn(server::mux::serve(server_io, |mut stream| async move {
+        let mut request = Vec::new();
+        let _ = stream.read_to_end(&mut request).await;
+        let _ = stream.close().await;
+    }));
+
+    let mut stream = handle.open_stream().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        stream.close().await.unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).await.unwrap();
+    })
+    .await
+    .expect("a stream closed before sending anything never ended");
+}

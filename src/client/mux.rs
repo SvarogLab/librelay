@@ -1,4 +1,6 @@
 use std::future::{Future, poll_fn};
+use std::io;
+use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -23,13 +25,71 @@ impl MuxHandle {
     /// Opens a new outbound stream multiplexed over the shared connection. Resolves once the
     /// driver loop has actually created the stream (which may briefly block on yamux's own
     /// outbound-stream ACK backlog).
-    pub async fn open_stream(&self) -> Result<yamux::Stream, MuxError> {
+    pub async fn open_stream(&self) -> Result<Stream, MuxError> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.open_tx
             .send(OpenRequest { reply: reply_tx })
             .await
             .map_err(|_| MuxError::Closed)?;
-        reply_rx.await.map_err(|_| MuxError::Closed)?
+        let inner = reply_rx.await.map_err(|_| MuxError::Closed)??;
+        Ok(Stream {
+            inner,
+            sent: false,
+            closed_unsent: false,
+        })
+    }
+}
+
+/// One outbound stream: a `yamux::Stream`, except that one closed before anything was written to it
+/// ends at once on this side.
+///
+/// yamux 0.14 opens a stream on the wire with its first data frame, and closing a stream that never
+/// sent one doesn't open it either: the server never hears of it, and a read waiting for the
+/// server's answer would wait forever. Such a stream has nothing to answer, so it reads as ended.
+pub struct Stream {
+    inner: yamux::Stream,
+    sent: bool,
+    closed_unsent: bool,
+}
+
+impl futures::AsyncRead for Stream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.closed_unsent {
+            return Poll::Ready(Ok(0));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl futures::AsyncWrite for Stream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let written = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = written
+            && n > 0
+        {
+            self.sent = true;
+        }
+        written
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if !self.sent {
+            self.closed_unsent = true;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_close(cx)
     }
 }
 

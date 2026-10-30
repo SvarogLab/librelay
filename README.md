@@ -24,6 +24,9 @@ One crate, two sides, each behind the feature of the same name (both on by defau
     server.
   - `lifecycle::shutdown_signal` resolves on SIGTERM or SIGINT, the cue for that graceful shutdown.
   - `log::LogFilter` reads `RUST_LOG` and `log::init` sets up the client's logging.
+  - `mux::MuxHandle::open_stream` returns a `mux::Stream`, a `yamux::Stream` except that one
+    closed before anything was written to it ends at once: yamux 0.14 never opens such a stream on
+    the wire, so the server would never answer it.
   - `systemd::take_listen_fds` and `systemd::listener_from_fd` take a socket-activated socket;
     `systemd::notify_ready` reports readiness to a `Type=notify` service.
   - The parts `relay::start` is built from — `spawn`, `mux`, `lifecycle` — stay public for a relay

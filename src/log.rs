@@ -4,16 +4,14 @@ use std::io::IsTerminal;
 
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Logs to stderr. Off a terminal, stderr ends in the journal — the client's directly, the
 /// server's through the client — and the journal stamps every line, so no timestamp is added.
+///
+/// Records of the `log` crate, which yamux logs through, are bridged in too.
 pub(crate) fn init_stderr(filter: EnvFilter) {
-    tracing::subscriber::set_global_default(subscriber(
-        filter,
-        std::io::stderr().is_terminal(),
-        std::io::stderr,
-    ))
-    .expect("a relay sets up logging once, before anything logs");
+    subscriber(filter, std::io::stderr().is_terminal(), std::io::stderr).init();
 }
 
 fn subscriber<W>(
@@ -60,6 +58,13 @@ mod tests {
         let subscriber = subscriber(EnvFilter::new("info"), on_terminal, move || writer.clone());
         tracing::subscriber::with_default(subscriber, || tracing::info!("started"));
         String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// yamux logs through the `log` crate.
+    #[test]
+    fn records_of_the_log_crate_reach_the_subscriber() {
+        init_stderr(EnvFilter::new("info"));
+        assert_ne!(log::max_level(), log::LevelFilter::Off);
     }
 
     #[test]

@@ -1,11 +1,10 @@
 //! Bringing a relay's link to its server up and down: everything between "the client starts" and
 //! "streams can be opened", and back.
 
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
-
-use std::os::fd::AsFd;
 
 use tokio::net::unix::pipe;
 use tokio::process::Child;
@@ -103,25 +102,34 @@ impl Link {
         drop(handle);
         let Link {
             mut child,
-            mut driver,
+            driver,
             mut output,
         } = self;
         let exited = async {
             // The driver's end drops the connection, and with it the server's stdin.
-            let _ = (&mut driver).await;
-            let drain = async {
-                let _ = tokio::io::copy(&mut output, &mut tokio::io::sink()).await;
-                std::future::pending::<()>().await
-            };
-            tokio::select! {
-                status = child.wait() => status,
-                () = drain => unreachable!("drain never completes"),
-            }
+            let _ = driver.await;
+            exit_status_draining(&mut child, &mut output).await
         };
         match tokio::time::timeout(timeout, exited).await {
             Ok(status) => Ok(status?),
             Err(_elapsed) => Err(CloseError::Timeout(timeout)),
         }
+    }
+}
+
+/// Reads whatever the server still writes to its stdout while it exits: a write that finds no
+/// reader kills it with SIGPIPE instead of letting it exit.
+async fn exit_status_draining(
+    child: &mut Child,
+    output: &mut pipe::Receiver,
+) -> std::io::Result<ExitStatus> {
+    let drain = async {
+        let _ = tokio::io::copy(output, &mut tokio::io::sink()).await;
+        std::future::pending().await
+    };
+    tokio::select! {
+        status = child.wait() => status,
+        status = drain => status,
     }
 }
 

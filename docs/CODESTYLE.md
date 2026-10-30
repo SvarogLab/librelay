@@ -25,7 +25,7 @@ into `clippy.toml` only with a comment naming the code it is for.
 
 Types and functions say what they are in the relay: the `client` runs on Linux, the `server` is
 the Windows process it spawns, and the `transport` is whatever the two say to each other over the
-server's stdio, which stays with each relay. Test names are sentences stating the behaviour they
+server's stdio, which stays with each relay. Test names are sentences stating the behavior they
 hold.
 
 ## Errors
@@ -37,7 +37,7 @@ hold.
 ## Comments
 
 Code says what it does; a comment says why, when the reason lives outside the code: a quirk of
-Windows, of WSL or of systemd, with the behaviour it forces.
+Windows, of WSL or of systemd, with the behavior it forces.
 
 ## Dependencies
 

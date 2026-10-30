@@ -10,14 +10,14 @@ description = "Shared pieces of a WSL relay: a Linux client that spawns one Wind
 [features]
 default = ["client", "server"]
 # The Linux side; compiles to nothing on other targets.
-client = ["mux", "dep:sd-notify"]
+client = ["mux", "dep:sd-notify", "dep:tracing-subscriber"]
 # The Windows side.
-server = ["mux", "dep:clap"]
+server = ["mux", "dep:clap", "dep:tracing-subscriber"]
 # The yamux connection both sides drive over the server's stdio; implied by either side.
 mux = ["dep:tokio", "dep:tokio-util", "dep:yamux", "dep:futures", "dep:thiserror", "dep:tracing"]
 
 [dependencies]
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
 clap = { version = "4.6.7", features = ["derive"], optional = true }
 thiserror = { version = "2.0.21", optional = true }
 tokio = { version = "1.54.1", features = ["io-util", "io-std", "macros", "net", "process", "rt", "signal", "sync", "time"], optional = true }

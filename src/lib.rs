@@ -2,10 +2,13 @@
 //! once, and talks to it over the server's stdin and stdout.
 //!
 //! [`client`] is the Linux side and [`server`] the Windows side, each behind the feature of the
-//! same name. What the two say to each other — the transport — stays with each relay.
+//! same name. They talk over a yamux connection ([`mux`]), one stream per unit of work; what goes
+//! over a stream stays with each relay.
 
 #[cfg(all(feature = "client", unix))]
 pub mod client;
+#[cfg(feature = "mux")]
+pub mod mux;
 #[cfg(feature = "server")]
 pub mod server;
 

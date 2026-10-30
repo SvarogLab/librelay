@@ -16,16 +16,16 @@ into `clippy.toml` only with a comment naming the code it is for.
 
 - A module with submodules lives in `name.rs` beside a `name/` directory, never in `name/mod.rs`
   (`clippy::mod_module_files` enforces it).
-- `client` is the Linux side and gated on `unix`; `server` is the Windows side and pulls in no
-  async runtime, so a synchronous server stays free of one.
+- `client` is the Linux side and gated on `unix`; `server` is the Windows side; `mux` is what both
+  share, implied by either.
 - Tests sit in a `tests` module at the bottom of the file they test, or in `name/tests.rs` when they
   outgrow it.
 
 ## Naming
 
 Types and functions say what they are in the relay: the `client` runs on Linux, the `server` is
-the Windows process it spawns, and the `transport` is whatever the two say to each other over the
-server's stdio, which stays with each relay. Test names are sentences stating the behavior they
+the Windows process it spawns, the `mux` the yamux connection between them over the server's
+stdio, and a `stream` one unit of work carried over it. Test names are sentences stating the behavior they
 hold.
 
 ## Errors

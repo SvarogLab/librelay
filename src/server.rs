@@ -1,3 +1,5 @@
-//! The Windows side: the log filter the client passes and the logging set up from it.
+//! The Windows side: accepting the client's streams, and the logging set up from the filter the
+//! client passes.
 
 pub mod log;
+pub mod mux;

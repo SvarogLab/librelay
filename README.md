@@ -17,18 +17,24 @@ One crate, two sides, each behind the feature of the same name (both on by defau
   - `spawn::Server::spawn` starts the server with all three standard streams piped, on the blocking
     pool, since the spawn itself can hang under the interop bug above. The server is killed when
     the `Server` is dropped.
-  - `lifecycle::died` resolves once the server exits or the relay's transport reports the link
-    gone, and says which; the relay then exits and systemd restarts it. `lifecycle::wait_alive` is an optional
-    startup check that fails if the server exits within a grace period.
+  - `mux::client` runs the client end of the yamux connection over the server's stdio; its
+    `MuxHandle` opens one stream per unit of work.
+  - `lifecycle::died` resolves once the server exits or the mux driver ends, and says which; the
+    relay then exits and systemd restarts it. `lifecycle::wait_alive` is an optional startup check
+    that fails if the server exits within a grace period.
   - `log::LogFilter` reads `RUST_LOG`; `log::init` sets up the client's logging and
     `log::forward_server_stderr` forwards the server's (see [Logging](#logging)).
   - `systemd::take_listen_fds` and `systemd::listener_from_fd` take a socket-activated socket;
     `systemd::notify_ready` reports readiness to a `Type=notify` service.
-- **`server`** (Windows): `log::LogArgs`, the server's required `--log-filter` flag, flattened into
-  its own `clap` arguments, and `log::init`, its logging. It pulls in no async runtime.
+- **`server`** (Windows):
+  - `mux::server` runs the server end of the yamux connection over its own stdin and stdout; its
+    `MuxAcceptor` hands out each stream the client opens. The driver ends once the client is gone,
+    which is the server's cue to exit.
+  - `log::LogArgs`, the server's required `--log-filter` flag, flattened into its own `clap`
+    arguments, and `log::init`, its logging.
 
-The transport — what the client and the server say to each other — stays with each relay:
-`sockrelay` multiplexes byte streams with `yamux`, `credrelay` exchanges JSON lines.
+What goes over a stream stays with each relay: `sockrelay` relays one connection's bytes to the
+ssh-agent pipe, `credrelay` sends one request line and reads one answer line.
 
 ## Usage
 
@@ -42,7 +48,7 @@ librelay = { git = "https://github.com/SvarogLab/librelay", tag = "v0.1.0", defa
 A client, in outline:
 
 ```rust
-use librelay::client::{lifecycle, log, spawn::Server, systemd};
+use librelay::client::{lifecycle, log, mux, spawn::Server, systemd};
 
 // Before the runtime starts: the environment may only change while there is one thread.
 let fds = unsafe { systemd::take_listen_fds() }?;
@@ -55,21 +61,35 @@ let mut server = Server::spawn("relay-server.exe".into(), server_args).await?;
 tokio::spawn(log::forward_server_stderr(server.stderr, tokio::io::stderr()));
 lifecycle::wait_alive(&mut server.child, Duration::from_millis(500)).await?;
 systemd::notify_ready()?;
-// ... run the transport over server.stdin and server.stdout, and exit once
-// lifecycle::died(&mut server.child, transport_ended) resolves.
+let (handle, driver) = mux::client(tokio::io::join(server.stdout, server.stdin));
+let mut driver = tokio::spawn(driver);
+// ... open a stream with handle.open_stream() per unit of work, and exit once
+// lifecycle::died(&mut server.child, &mut driver) resolves.
 ```
 
-A server flattens `LogArgs` into its own arguments and initialises logging from it:
+A server flattens `LogArgs` into its own arguments, logs from it, and serves streams until the
+client goes away:
 
 ```rust
+use librelay::server::{log, mux};
+
 #[derive(clap::Parser)]
 struct Config {
     #[command(flatten)]
-    log: librelay::server::log::LogArgs,
+    log: log::LogArgs,
 }
 
 let config = Config::parse();
-librelay::server::log::init(&config.log);
+log::init(&config.log);
+
+let (mut acceptor, driver) = mux::server(tokio::io::join(tokio::io::stdin(), tokio::io::stdout()));
+tokio::spawn(async move {
+    while let Some(stream) = acceptor.accept().await {
+        tokio::spawn(serve(stream));
+    }
+});
+let _ = driver.await;
+// The client is gone: exit, which also closes whatever the server held open.
 ```
 
 ## Logging

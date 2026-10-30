@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 
+use std::os::fd::AsFd;
+
+use tokio::net::unix::pipe;
 use tokio::process::Child;
 use tokio::task::JoinHandle;
 
@@ -20,6 +23,8 @@ pub enum StartError {
     Spawn(#[from] SpawnError),
     #[error(transparent)]
     NotAlive(#[from] NotAlive),
+    #[error("couldn't keep hold of the server's output: {0}")]
+    Output(#[source] std::io::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +39,10 @@ pub enum CloseError {
 pub struct Link {
     child: Child,
     driver: JoinHandle<Result<(), MuxError>>,
+    /// A second read end of the server's stdout, which outlives the mux: once the connection is
+    /// closed, the server — through the WSL proxy that carries its output — may still write its
+    /// last frames, and with no read end left it would die of SIGPIPE instead of exiting.
+    output: pipe::Receiver,
 }
 
 /// Spawns the server, forwards its stderr to this process's, and runs the client end of the mux
@@ -45,6 +54,12 @@ pub async fn start(
     grace: Option<Duration>,
 ) -> Result<(MuxHandle, Link), StartError> {
     let mut server = Server::spawn(server_exe, server_args).await?;
+    let output = server
+        .stdout
+        .as_fd()
+        .try_clone_to_owned()
+        .and_then(pipe::Receiver::from_owned_fd)
+        .map_err(StartError::Output)?;
     tokio::spawn(log::forward_server_stderr(
         server.stderr,
         tokio::io::stderr(),
@@ -59,6 +74,7 @@ pub async fn start(
         Link {
             child: server.child,
             driver,
+            output,
         },
     ))
 }
@@ -80,15 +96,27 @@ impl Link {
     /// in-flight work finish — is dropped, the client closes the mux, the server sees the
     /// connection end and exits, and this waits up to `timeout` for its exit status.
     pub async fn close(
-        mut self,
+        self,
         handle: MuxHandle,
         timeout: Duration,
     ) -> Result<ExitStatus, CloseError> {
         drop(handle);
+        let Link {
+            mut child,
+            mut driver,
+            mut output,
+        } = self;
         let exited = async {
             // The driver's end drops the connection, and with it the server's stdin.
-            let _ = (&mut self.driver).await;
-            self.child.wait().await
+            let _ = (&mut driver).await;
+            let drain = async {
+                let _ = tokio::io::copy(&mut output, &mut tokio::io::sink()).await;
+                std::future::pending::<()>().await
+            };
+            tokio::select! {
+                status = child.wait() => status,
+                () = drain => unreachable!("drain never completes"),
+            }
         };
         match tokio::time::timeout(timeout, exited).await {
             Ok(status) => Ok(status?),
@@ -119,10 +147,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_link_is_lost_once_the_server_exits() {
-        let (_handle, mut link) =
-            start("sh".into(), sh("cat >/dev/null & sleep 0.2; exit 4"), None)
-                .await
-                .unwrap();
+        let (_handle, mut link) = start("sh".into(), sh("sleep 2 & exit 4"), None)
+            .await
+            .unwrap();
         let died = tokio::time::timeout(Duration::from_secs(5), link.died())
             .await
             .expect("the lost link was not reported");
@@ -141,6 +168,17 @@ mod tests {
             .unwrap();
         let status = link.close(handle, Duration::from_secs(5)).await.unwrap();
         assert!(status.success());
+    }
+
+    /// A server still writing once the connection is closed — a reply to the close, its own
+    /// goodbye — must not find its stdout gone, or it dies of SIGPIPE instead of exiting.
+    #[tokio::test]
+    async fn close_keeps_reading_the_servers_output_until_it_exits() {
+        let (handle, link) = start("sh".into(), sh("cat >/dev/null; printf bye; exit 0"), None)
+            .await
+            .unwrap();
+        let status = link.close(handle, Duration::from_secs(5)).await.unwrap();
+        assert!(status.success(), "{status}");
     }
 
     #[tokio::test]

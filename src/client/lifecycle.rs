@@ -31,6 +31,15 @@ impl std::fmt::Display for Died {
     }
 }
 
+impl std::error::Error for Died {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Died::Exited(Err(e)) => Some(e),
+            Died::Exited(Ok(_)) | Died::TransportEnded => None,
+        }
+    }
+}
+
 /// Resolves once the link to the server is gone: the server process exits, or `transport_ended`
 /// — whatever the relay's own protocol uses to notice a dead link — resolves first.
 pub async fn died(child: &mut Child, transport_ended: impl Future) -> Died {
@@ -128,6 +137,14 @@ mod tests {
             unreadable.to_string(),
             "the server is gone; its exit status couldn't be read: no such process"
         );
+    }
+
+    #[test]
+    fn died_is_an_error_with_its_cause() {
+        use std::error::Error;
+        let unreadable = Died::Exited(Err(std::io::Error::other("no such process")));
+        assert_eq!(unreadable.source().unwrap().to_string(), "no such process");
+        assert!(Died::TransportEnded.source().is_none());
     }
 
     #[tokio::test]

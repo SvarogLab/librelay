@@ -7,7 +7,7 @@ pub struct LogArgs {
     /// `tracing` filter for this process's diagnostics, in `RUST_LOG` syntax. A flag rather than
     /// `RUST_LOG` itself, since environment variables don't cross the WSL interop boundary.
     #[arg(long = "log-filter", value_parser = parse_log_filter)]
-    pub log_filter: String,
+    pub filter: String,
 }
 
 fn parse_log_filter(value: &str) -> Result<String, String> {
@@ -20,7 +20,7 @@ fn parse_log_filter(value: &str) -> Result<String, String> {
 /// the journal stamps every line, so the server's own timestamp is left out.
 pub fn init(args: &LogArgs) {
     use std::io::IsTerminal;
-    let filter = tracing_subscriber::EnvFilter::try_new(&args.log_filter)
+    let filter = tracing_subscriber::EnvFilter::try_new(&args.filter)
         .expect("--log-filter is validated while parsing");
     let on_terminal = std::io::stderr().is_terminal();
     let subscriber = tracing_subscriber::fmt()
@@ -55,7 +55,7 @@ mod tests {
         let config =
             Config::try_parse_from(["relay-server", crate::LOG_FILTER_FLAG, "debug,yamux=warn"])
                 .unwrap();
-        assert_eq!(config.log.log_filter, "debug,yamux=warn");
+        assert_eq!(config.log.filter, "debug,yamux=warn");
     }
 
     #[test]

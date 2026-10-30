@@ -26,7 +26,11 @@ impl Server {
     /// The spawn runs on the blocking pool: starting a Windows process from WSL can hang inside
     /// the spawn call itself (microsoft/WSL#7371), and there it stalls one blocking thread rather
     /// than an async worker.
-    pub async fn spawn(path: PathBuf, args: Vec<String>) -> Result<Self, SpawnError> {
+    pub async fn spawn(
+        path: PathBuf,
+        args: impl IntoIterator<Item = String>,
+    ) -> Result<Self, SpawnError> {
+        let args: Vec<String> = args.into_iter().collect();
         tokio::task::spawn_blocking(move || {
             let mut child = Command::new(&path)
                 .args(&args)
@@ -67,11 +71,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_child_gets_its_arguments() {
-        let args = vec![
-            "-c".into(),
-            "printf %s \"$0\"".into(),
-            "--log-filter".into(),
-        ];
+        let args = ["-c", "printf %s \"$0\"", "--log-filter"].map(String::from);
         let mut server = Server::spawn("sh".into(), args).await.unwrap();
         let mut printed = Vec::new();
         server.stdout.read_to_end(&mut printed).await.unwrap();

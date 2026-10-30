@@ -7,12 +7,21 @@ use std::time::Duration;
 
 use tokio::process::Child;
 
+/// How the link to the server was lost, for the relay to log before it exits.
+#[derive(Debug)]
+pub enum Died {
+    /// The server process exited, with this status if it could be read.
+    Exited(std::io::Result<ExitStatus>),
+    /// The relay's transport reported the link gone while the server was still running.
+    TransportEnded,
+}
+
 /// Resolves once the link to the server is gone: the server process exits, or `transport_ended`
 /// — whatever the relay's own protocol uses to notice a dead link — resolves first.
-pub async fn died(child: &mut Child, transport_ended: impl Future) {
+pub async fn died(child: &mut Child, transport_ended: impl Future) -> Died {
     tokio::select! {
-        _ = child.wait() => {}
-        _ = transport_ended => {}
+        status = child.wait() => Died::Exited(status),
+        _ = transport_ended => Died::TransportEnded,
     }
 }
 
@@ -54,22 +63,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn died_resolves_when_the_server_exits() {
-        let mut child = spawn("exit 0");
-        tokio::time::timeout(
+    async fn died_reports_the_servers_exit_status() {
+        let mut child = spawn("exit 3");
+        let died = tokio::time::timeout(
             Duration::from_secs(5),
             died(&mut child, std::future::pending::<()>()),
         )
         .await
         .expect("died() did not resolve after the server exited");
+        match died {
+            Died::Exited(status) => assert_eq!(status.unwrap().code(), Some(3)),
+            Died::TransportEnded => panic!("the server exited, the transport didn't end"),
+        }
     }
 
     #[tokio::test]
-    async fn died_resolves_when_the_transport_ends() {
+    async fn died_reports_the_transport_ending() {
         let mut child = spawn("sleep 30");
-        tokio::time::timeout(Duration::from_secs(5), died(&mut child, async {}))
+        let died = tokio::time::timeout(Duration::from_secs(5), died(&mut child, async {}))
             .await
             .expect("died() did not resolve after the transport ended");
+        assert!(matches!(died, Died::TransportEnded));
     }
 
     #[tokio::test]

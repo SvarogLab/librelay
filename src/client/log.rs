@@ -44,7 +44,8 @@ impl LogFilter {
     }
 }
 
-/// Logs to stderr — the journal, under systemd — colored only on a terminal.
+/// Logs to stderr — the journal, under systemd — colored only on a terminal. Consumes the filter,
+/// so take [`LogFilter::server_args`] first.
 pub fn init(filter: LogFilter) {
     use std::io::IsTerminal;
     tracing_subscriber::fmt()

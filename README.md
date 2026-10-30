@@ -18,7 +18,7 @@ One crate, two sides, each behind the feature of the same name (both on by defau
     pool, since the spawn itself can hang under the interop bug above. The server is killed when
     the `Server` is dropped.
   - `lifecycle::died` resolves once the server exits or the relay's transport reports the link
-    gone; the relay then exits and systemd restarts it. `lifecycle::wait_alive` is an optional
+    gone, and says which; the relay then exits and systemd restarts it. `lifecycle::wait_alive` is an optional
     startup check that fails if the server exits within a grace period.
   - `log::LogFilter` reads `RUST_LOG`; `log::init` sets up the client's logging and
     `log::forward_server_stderr` forwards the server's (see [Logging](#logging)).
@@ -51,7 +51,7 @@ let server_args = filter.server_args();
 log::init(filter);
 
 // Inside the runtime:
-let mut server = Server::spawn("relay-server.exe".into(), server_args.into()).await?;
+let mut server = Server::spawn("relay-server.exe".into(), server_args).await?;
 tokio::spawn(log::forward_server_stderr(server.stderr, tokio::io::stderr()));
 lifecycle::wait_alive(&mut server.child, Duration::from_millis(500)).await?;
 systemd::notify_ready()?;

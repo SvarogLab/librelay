@@ -40,12 +40,21 @@ impl std::error::Error for Died {
     }
 }
 
+/// How long an ended transport waits for the server's exit status. A server's pipes close as it
+/// exits, so the transport often notices first, and the status says more about what happened.
+const EXIT_STATUS_WAIT: Duration = Duration::from_millis(500);
+
 /// Resolves once the link to the server is gone: the server process exits, or `transport_ended`
 /// — whatever the relay's own protocol uses to notice a dead link — resolves first.
 pub async fn died(child: &mut Child, transport_ended: impl Future) -> Died {
     tokio::select! {
         status = child.wait() => Died::Exited(status),
-        _ = transport_ended => Died::TransportEnded,
+        _ = transport_ended => {
+            match tokio::time::timeout(EXIT_STATUS_WAIT, child.wait()).await {
+                Ok(status) => Died::Exited(status),
+                Err(_still_running) => Died::TransportEnded,
+            }
+        }
     }
 }
 
@@ -121,6 +130,18 @@ mod tests {
             .await
             .expect("died() did not resolve after the transport ended");
         assert!(matches!(died, Died::TransportEnded));
+    }
+
+    #[tokio::test]
+    async fn a_transport_that_ends_as_the_server_exits_reports_the_exit_status() {
+        let mut child = spawn("sleep 0.1; exit 4");
+        let died = tokio::time::timeout(Duration::from_secs(5), died(&mut child, async {}))
+            .await
+            .expect("died() did not resolve");
+        match died {
+            Died::Exited(status) => assert_eq!(status.unwrap().code(), Some(4)),
+            Died::TransportEnded => panic!("the server's exit status was lost"),
+        }
     }
 
     #[tokio::test]

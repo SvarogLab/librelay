@@ -147,9 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_link_is_lost_once_the_server_exits() {
-        let (_handle, mut link) = start("sh".into(), sh("sleep 2 & exit 4"), None)
-            .await
-            .unwrap();
+        let (_handle, mut link) = start("sh".into(), sh("exit 4"), None).await.unwrap();
         let died = tokio::time::timeout(Duration::from_secs(5), link.died())
             .await
             .expect("the lost link was not reported");

@@ -3,28 +3,27 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use tokio_util::compat::TokioAsyncReadCompatExt;
-
-use crate::mux::MuxError;
+use crate::mux::{self as shared, MuxError};
 
 /// A request to open a new outbound yamux stream, answered by the driver loop.
 struct OpenRequest {
     reply: tokio::sync::oneshot::Sender<Result<yamux::Stream, MuxError>>,
 }
 
-/// A cloneable handle used by any number of tasks to open outbound streams over the single
-/// shared mux connection. The actual `yamux::Connection` is owned and driven exclusively by the
-/// future returned alongside this handle from [`client`] — this handle only ever talks to it
-/// over a channel.
+/// Opens outbound streams over the one connection; clone it for every task that needs one. The
+/// connection itself belongs to the driver [`client`] returns with it.
 #[derive(Clone)]
 pub struct MuxHandle {
     open_tx: tokio::sync::mpsc::Sender<OpenRequest>,
 }
 
 impl MuxHandle {
-    /// Opens a new outbound stream multiplexed over the shared connection. Resolves once the
-    /// driver loop has actually created the stream (which may briefly block on yamux's own
-    /// outbound-stream ACK backlog).
+    /// Opens a new stream once the driver has created it, which yamux holds back while too many
+    /// streams wait for the server's acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// [`MuxError::Closed`] once the driver has ended, or the connection's own error.
     pub async fn open_stream(&self) -> Result<Stream, MuxError> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.open_tx
@@ -93,17 +92,15 @@ impl futures::AsyncWrite for Stream {
     }
 }
 
-/// Builds a client-mode mux over `io` (the spawned server's joined stdout and stdin, or any other
-/// duplex transport — see the tests below, which use `tokio::io::duplex`). Returns a
-/// handle for opening streams plus the driver future, which the caller must poll to completion
-/// (e.g. via `tokio::spawn`) for the connection to make any progress at all — this isn't
-/// optional background bookkeeping, it's what actually reads/writes the underlying transport.
+/// Builds the client end of a mux over `io`, the server's joined stdout and stdin.
+///
+/// Returns the handle that opens streams and the driver, which must be polled to completion (see
+/// [`shared::connection`]); every handle dropped closes the connection.
 pub fn client<T>(io: T) -> (MuxHandle, impl Future<Output = Result<(), MuxError>>)
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let connection =
-        yamux::Connection::new(io.compat(), yamux::Config::default(), yamux::Mode::Client);
+    let connection = shared::connection(io, yamux::Mode::Client);
     let (open_tx, open_rx) = tokio::sync::mpsc::channel(32);
     let mut driver = Driver {
         connection,
@@ -126,46 +123,49 @@ impl<T> Driver<T>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin,
 {
-    /// Drives the connection: services outbound-open requests and, whether or not there are any,
-    /// keeps polling `poll_next_inbound` since that's the only thing that flushes queued frames
-    /// and processes incoming ones (yamux 0.14 has no separate driving-loop primitive of its
-    /// own — driving the connection *is* what makes progress).
     fn poll_drive(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), MuxError>> {
+        if self.poll_open_requests(cx).is_ready() {
+            return self.connection.poll_close(cx).map_err(MuxError::Connection);
+        }
+        self.poll_inbound(cx)
+    }
+
+    /// Opens a stream for every request as far as yamux allows; ready once every handle is gone
+    /// and nothing can ask for another.
+    fn poll_open_requests(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         loop {
             if let Some(reply) = self.pending_reply.take() {
                 match self.connection.poll_new_outbound(cx) {
-                    Poll::Ready(result) => {
-                        let _ = reply.send(result.map_err(MuxError::Connection));
-                        continue;
+                    Poll::Ready(stream) => {
+                        let _ = reply.send(stream.map_err(MuxError::Connection));
                     }
-                    Poll::Pending => self.pending_reply = Some(reply),
+                    Poll::Pending => {
+                        self.pending_reply = Some(reply);
+                        return Poll::Pending;
+                    }
                 }
             } else {
                 match self.open_rx.poll_recv(cx) {
-                    Poll::Ready(Some(request)) => {
-                        self.pending_reply = Some(request.reply);
-                        continue;
-                    }
-                    Poll::Ready(None) => {
-                        // Every `MuxHandle` was dropped: nothing can request new streams anymore,
-                        // so close the connection gracefully instead of driving it forever.
-                        return self.connection.poll_close(cx).map_err(MuxError::Connection);
-                    }
-                    Poll::Pending => {}
+                    Poll::Ready(Some(request)) => self.pending_reply = Some(request.reply),
+                    Poll::Ready(None) => return Poll::Ready(()),
+                    Poll::Pending => return Poll::Pending,
                 }
             }
+        }
+    }
 
-            return match self.connection.poll_next_inbound(cx) {
+    /// Moves frames both ways until the connection ends; that is also what sends the frames
+    /// queued for outbound streams.
+    fn poll_inbound(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), MuxError>> {
+        loop {
+            match self.connection.poll_next_inbound(cx) {
                 Poll::Ready(Some(Ok(_stream))) => {
-                    // The client side of this design never expects the server to open streams
-                    // back to it; drop it and keep driving.
-                    tracing::warn!("dropping unexpected inbound yamux stream on client mux");
-                    continue;
+                    tracing::warn!("dropping a stream the server opened; servers don't open any");
                 }
-                Poll::Ready(Some(Err(e))) => Poll::Ready(Err(MuxError::Connection(e))),
-                Poll::Ready(None) => Poll::Ready(Err(MuxError::Closed)),
-                Poll::Pending => Poll::Pending,
-            };
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(MuxError::Connection(e))),
+                Poll::Ready(None) => return Poll::Ready(Err(MuxError::Closed)),
+                Poll::Pending => return Poll::Pending,
+            }
         }
     }
 }
@@ -174,8 +174,6 @@ where
 mod tests {
     use super::*;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
-    use std::future::Future as StdFuture;
-    use std::pin::Pin;
 
     /// Drives a bare `Mode::Server` yamux connection in the background, echoing back whatever
     /// bytes it reads on each inbound stream, so this test exercises a real two-sided exchange
@@ -185,8 +183,7 @@ mod tests {
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         tokio::spawn(async move {
-            let mut connection =
-                yamux::Connection::new(io.compat(), yamux::Config::default(), yamux::Mode::Server);
+            let mut connection = shared::connection(io, yamux::Mode::Server);
             loop {
                 let next = std::future::poll_fn(|cx| connection.poll_next_inbound(cx)).await;
                 match next {
@@ -205,17 +202,11 @@ mod tests {
         })
     }
 
-    fn spawn_driver(
-        driver: impl StdFuture<Output = Result<(), MuxError>> + Send + 'static,
-    ) -> tokio::task::JoinHandle<Result<(), MuxError>> {
-        tokio::spawn(Box::pin(driver) as Pin<Box<dyn StdFuture<Output = _> + Send>>)
-    }
-
     #[tokio::test]
     async fn open_stream_relays_data_end_to_end() {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (handle, driver) = client(client_io);
-        spawn_driver(driver);
+        tokio::spawn(driver);
         spawn_echo_server(server_io);
 
         let mut stream = handle.open_stream().await.unwrap();
@@ -231,7 +222,7 @@ mod tests {
     async fn multiple_concurrent_streams_are_independent() {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (handle, driver) = client(client_io);
-        spawn_driver(driver);
+        tokio::spawn(driver);
         spawn_echo_server(server_io);
 
         let mut tasks = Vec::new();

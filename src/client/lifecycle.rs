@@ -19,14 +19,14 @@ pub enum Died {
 impl std::fmt::Display for Died {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Died::Exited(Ok(status)) => write!(f, "the server exited ({status})"),
-            Died::Exited(Err(e)) => {
+            Self::Exited(Ok(status)) => write!(f, "the server exited ({status})"),
+            Self::Exited(Err(e)) => {
                 write!(
                     f,
                     "the server is gone; its exit status couldn't be read: {e}"
                 )
             }
-            Died::TransportEnded => write!(f, "the mux connection to the server ended"),
+            Self::TransportEnded => write!(f, "the mux connection to the server ended"),
         }
     }
 }
@@ -34,8 +34,8 @@ impl std::fmt::Display for Died {
 impl std::error::Error for Died {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Died::Exited(Err(e)) => Some(e),
-            Died::Exited(Ok(_)) | Died::TransportEnded => None,
+            Self::Exited(Err(e)) => Some(e),
+            Self::Exited(Ok(_)) | Self::TransportEnded => None,
         }
     }
 }
@@ -71,6 +71,10 @@ pub enum NotAlive {
 
 /// Resolves on SIGTERM — what `systemctl stop` sends — or SIGINT, for the relay to shut down
 /// gracefully instead of being killed mid-request.
+///
+/// # Errors
+///
+/// If a signal handler can't be installed.
 pub async fn shutdown_signal() -> std::io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut terminate = signal(SignalKind::terminate())?;
@@ -82,9 +86,15 @@ pub async fn shutdown_signal() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Waits out `within` and fails if the server exits during it. There's no positive health signal
-/// to wait for, so this always takes the whole of `within` on success: it catches a server that
-/// exits right away on a startup check, and is a tax on every start otherwise.
+/// Waits out `within` and fails if the server exits during it.
+///
+/// There's no positive health signal to wait for, so this always takes the whole of `within` on
+/// success: it catches a server that exits right away on a startup check, and is a tax on every
+/// start otherwise.
+///
+/// # Errors
+///
+/// [`NotAlive`] if the server exited within `within`, or its exit status couldn't be read.
 pub async fn wait_alive(child: &mut Child, within: Duration) -> Result<(), NotAlive> {
     match tokio::time::timeout(within, child.wait()).await {
         Err(_elapsed) => Ok(()),

@@ -3,9 +3,14 @@
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 
-/// Takes the listening sockets systemd passed to this process (none unless socket-activated) and
-/// unsets `LISTEN_PID`/`LISTEN_FDS`, so a spawned server doesn't see sockets meant for this
+/// Takes the listening sockets systemd passed to this process, none unless socket-activated.
+///
+/// Unsets `LISTEN_PID`/`LISTEN_FDS`, so a spawned server doesn't see sockets meant for this
 /// process. The fds come back close-on-exec.
+///
+/// # Errors
+///
+/// If the socket-activation variables are malformed.
 ///
 /// # Safety
 ///
@@ -16,8 +21,13 @@ pub unsafe fn take_listen_fds() -> io::Result<Vec<RawFd>> {
     unsafe { sd_notify::listen_fds_and_unset_env() }.map(Iterator::collect)
 }
 
-/// Takes over a listening unix socket passed as `fd` (see [`take_listen_fds`]). Fails if `fd`
-/// isn't a unix socket — a `.socket` unit with a TCP `ListenStream=`, say. Needs a tokio runtime.
+/// Takes over a listening unix socket passed as `fd` (see [`take_listen_fds`]). Needs a tokio
+/// runtime.
+///
+/// # Errors
+///
+/// If `fd` isn't a unix socket — a `.socket` unit with a TCP `ListenStream=`, say — or can't be
+/// made non-blocking.
 pub fn listener_from_fd(fd: RawFd) -> io::Result<tokio::net::UnixListener> {
     // SAFETY: systemd passes each listening fd to this process alone, and `take_listen_fds`
     // hands it out exactly once.
@@ -28,8 +38,14 @@ pub fn listener_from_fd(fd: RawFd) -> io::Result<tokio::net::UnixListener> {
     tokio::net::UnixListener::from_std(listener)
 }
 
-/// Tells systemd the service is ready. A no-op unless it runs as `Type=notify`, which then counts
-/// the service as started only now rather than at exec.
+/// Tells systemd the service is ready.
+///
+/// A no-op unless it runs as `Type=notify`, which then counts the service as started only now
+/// rather than at exec.
+///
+/// # Errors
+///
+/// If the notification can't be sent to systemd's socket.
 pub fn notify_ready() -> io::Result<()> {
     sd_notify::notify(&[sd_notify::NotifyState::Ready])
 }

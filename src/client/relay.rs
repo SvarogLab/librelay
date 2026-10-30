@@ -7,7 +7,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use tokio::net::unix::pipe;
-use tokio::process::Child;
+use tokio::process::{Child, ChildStdout};
 use tokio::task::JoinHandle;
 
 use crate::client::lifecycle::{self, Died, NotAlive};
@@ -44,21 +44,23 @@ pub struct Link {
     output: pipe::Receiver,
 }
 
-/// Spawns the server, forwards its stderr to this process's, and runs the client end of the mux
-/// over its stdio. With `grace`, also waits that long for the server to prove it stays up (see
+/// Spawns the server and brings the link up: its stderr forwarded to this process's, the client
+/// end of the mux over its stdio.
+///
+/// With `grace`, also waits that long for the server to prove it stays up (see
 /// [`lifecycle::wait_alive`]). Returns the handle that opens streams, and the [`Link`].
+///
+/// # Errors
+///
+/// [`StartError`] if the server can't be spawned, exits within `grace`, or its output can't be
+/// held on to.
 pub async fn start(
     server_exe: PathBuf,
     server_args: impl IntoIterator<Item = String>,
     grace: Option<Duration>,
 ) -> Result<(MuxHandle, Link), StartError> {
     let mut server = Server::spawn(server_exe, server_args).await?;
-    let output = server
-        .stdout
-        .as_fd()
-        .try_clone_to_owned()
-        .and_then(pipe::Receiver::from_owned_fd)
-        .map_err(StartError::Output)?;
+    let output = second_read_end(&server.stdout).map_err(StartError::Output)?;
     tokio::spawn(log::forward_server_stderr(
         server.stderr,
         tokio::io::stderr(),
@@ -91,16 +93,23 @@ impl Link {
         died
     }
 
-    /// Shuts the link down gracefully. Once `handle` — the last one, after the relay has let its
-    /// in-flight work finish — is dropped, the client closes the mux, the server sees the
-    /// connection end and exits, and this waits up to `timeout` for its exit status.
+    /// Shuts the link down gracefully.
+    ///
+    /// Once `handle` — the last one, after the relay has let its in-flight work finish — is
+    /// dropped, the client closes the mux, the server sees the connection end and exits, and this
+    /// waits up to `timeout` for its exit status.
+    ///
+    /// # Errors
+    ///
+    /// [`CloseError::Timeout`] if the server is still running after `timeout`, or
+    /// [`CloseError::Wait`] if its exit status can't be read.
     pub async fn close(
         self,
         handle: MuxHandle,
         timeout: Duration,
     ) -> Result<ExitStatus, CloseError> {
         drop(handle);
-        let Link {
+        let Self {
             mut child,
             driver,
             mut output,
@@ -115,6 +124,14 @@ impl Link {
             Err(_elapsed) => Err(CloseError::Timeout(timeout)),
         }
     }
+}
+
+/// A read end of the server's stdout of its own, for [`Link::output`].
+fn second_read_end(stdout: &ChildStdout) -> std::io::Result<pipe::Receiver> {
+    stdout
+        .as_fd()
+        .try_clone_to_owned()
+        .and_then(pipe::Receiver::from_owned_fd)
 }
 
 /// Reads whatever the server still writes to its stdout while it exits: a write that finds no

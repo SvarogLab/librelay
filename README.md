@@ -14,22 +14,25 @@ interop bug under load ([microsoft/WSL #7371](https://github.com/microsoft/WSL/i
 One crate, two sides, each behind the feature of the same name (both on by default):
 
 - **`client`** (Linux; compiles to nothing elsewhere):
-  - `spawn::Server::spawn` starts the server with all three standard streams piped, on the blocking
-    pool, since the spawn itself can hang under the interop bug above. The server is killed when
-    the `Server` is dropped.
-  - `mux::client` runs the client end of the yamux connection over the server's stdio; its
-    `MuxHandle` opens one stream per unit of work.
-  - `lifecycle::died` resolves once the server exits or the mux driver ends, and says which; the
-    relay then exits and systemd restarts it. `lifecycle::wait_alive` is an optional startup check
-    that fails if the server exits within a grace period.
-  - `log::LogFilter` reads `RUST_LOG`; `log::init` sets up the client's logging and
-    `log::forward_server_stderr` forwards the server's (see [Logging](#logging)).
+  - `relay::start` brings the link up: it spawns the server, forwards its stderr (see
+    [Logging](#logging)), runs the client end of the yamux connection over the server's stdio and,
+    if asked, waits out a grace period for the server to prove it stays up. It returns the
+    `MuxHandle` that opens one stream per unit of work, and a `Link`.
+  - `Link::died` resolves once the server exits or the connection ends, and says which; the relay
+    then exits and systemd restarts it. `Link::close` shuts down gracefully: the connection closes,
+    the server exits on its own, and its exit status comes back. Dropping the `Link` kills the
+    server.
+  - `lifecycle::shutdown_signal` resolves on SIGTERM or SIGINT, the cue for that graceful shutdown.
+  - `log::LogFilter` reads `RUST_LOG` and `log::init` sets up the client's logging.
   - `systemd::take_listen_fds` and `systemd::listener_from_fd` take a socket-activated socket;
     `systemd::notify_ready` reports readiness to a `Type=notify` service.
+  - The parts `relay::start` is built from — `spawn`, `mux`, `lifecycle` — stay public for a relay
+    that needs them on their own.
 - **`server`** (Windows):
-  - `mux::server` runs the server end of the yamux connection over its own stdin and stdout; its
-    `MuxAcceptor` hands out each stream the client opens. The driver ends once the client is gone,
-    which is the server's cue to exit.
+  - `mux::serve` serves the client's streams over the server's stdin and stdout, one task per
+    stream, and returns as soon as the client is gone — it closed the connection, or its whole side
+    went away — without waiting for handlers still running. The server then exits, which releases
+    whatever they hold, so it never outlives its client.
   - `log::LogArgs`, the server's required `--log-filter` flag, flattened into its own `clap`
     arguments, and `log::init`, its logging.
 
@@ -48,7 +51,7 @@ librelay = { git = "https://github.com/SvarogLab/librelay", tag = "v0.1.0", defa
 A client, in outline:
 
 ```rust
-use librelay::client::{lifecycle, log, mux, spawn::Server, systemd};
+use librelay::client::{lifecycle, log, relay, systemd};
 
 // Before the runtime starts: the environment may only change while there is one thread.
 let fds = unsafe { systemd::take_listen_fds() }?;
@@ -57,14 +60,16 @@ let server_args = filter.server_args();
 log::init(filter);
 
 // Inside the runtime:
-let mut server = Server::spawn("relay-server.exe".into(), server_args).await?;
-tokio::spawn(log::forward_server_stderr(server.stderr, tokio::io::stderr()));
-lifecycle::wait_alive(&mut server.child, Duration::from_millis(500)).await?;
+let (handle, mut link) =
+    relay::start("relay-server.exe".into(), server_args, Some(Duration::from_millis(500))).await?;
 systemd::notify_ready()?;
-let (handle, driver) = mux::client(tokio::io::join(server.stdout, server.stdin));
-let mut driver = tokio::spawn(driver);
-// ... open a stream with handle.open_stream() per unit of work, and exit once
-// lifecycle::died(&mut server.child, &mut driver) resolves.
+// ... hand clones of `handle` to the work, each opening a stream per unit of work, then:
+tokio::select! {
+    died = link.died() => return Err(died),   // logged; systemd restarts the relay
+    _ = lifecycle::shutdown_signal() => {}
+}
+// Stop taking work, let what's in flight finish, drop its handles, then:
+let status = link.close(handle, Duration::from_secs(5)).await?;
 ```
 
 A server flattens `LogArgs` into its own arguments, logs from it, and serves streams until the
@@ -81,15 +86,9 @@ struct Config {
 
 let config = Config::parse();
 log::init(&config.log);
-
-let (mut acceptor, driver) = mux::server(tokio::io::join(tokio::io::stdin(), tokio::io::stdout()));
-tokio::spawn(async move {
-    while let Some(stream) = acceptor.accept().await {
-        tokio::spawn(serve(stream));
-    }
-});
-let _ = driver.await;
-// The client is gone: exit, which also closes whatever the server held open.
+let stdio = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
+let outcome = mux::serve(stdio, |stream| async move { /* one unit of work */ }).await;
+std::process::exit(if outcome.is_ok() { 0 } else { 1 });
 ```
 
 ## Logging

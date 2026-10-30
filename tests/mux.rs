@@ -33,7 +33,7 @@ async fn a_stream_the_client_opens_reaches_the_server_and_back() {
 }
 
 #[tokio::test]
-async fn the_server_driver_ends_when_the_client_goes_away() {
+async fn the_server_driver_ends_cleanly_when_the_client_closes_the_connection() {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (handle, client_driver) = client::mux::client(client_io);
     let (_acceptor, server_driver) = server::mux::server(server_io);
@@ -46,5 +46,68 @@ async fn the_server_driver_ends_when_the_client_goes_away() {
         .await
         .expect("the server driver kept running after the client closed the connection")
         .unwrap()
-        .unwrap_err();
+        .expect("a connection the client closed is a normal end, not an error");
+}
+
+#[tokio::test]
+async fn serve_runs_the_handler_for_each_stream_and_returns_once_the_client_is_gone() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (handle, client_driver) = client::mux::client(client_io);
+    let client_driver = tokio::spawn(client_driver);
+    let served = tokio::spawn(server::mux::serve(server_io, |mut stream| async move {
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).await.unwrap();
+        request.make_ascii_uppercase();
+        stream.write_all(&request).await.unwrap();
+        stream.close().await.unwrap();
+    }));
+
+    for word in ["one", "two"] {
+        let mut stream = handle.open_stream().await.unwrap();
+        stream.write_all(word.as_bytes()).await.unwrap();
+        stream.close().await.unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.unwrap();
+        assert_eq!(answer, word.to_uppercase());
+    }
+
+    drop(handle);
+    client_driver.await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), served)
+        .await
+        .expect("serve() kept running after the client went away")
+        .unwrap()
+        .unwrap();
+}
+
+/// A client that dies without closing the connection — killed, or its whole side gone — leaves the
+/// server's input at end of file mid-connection. The server has to notice that and stop too, or
+/// it lingers on Windows as an orphan.
+#[tokio::test]
+async fn serve_returns_when_the_client_vanishes_without_closing() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (handle, client_driver) = client::mux::client(client_io);
+    let client_driver = tokio::spawn(client_driver);
+    let (stalled_tx, stalled_rx) = tokio::sync::oneshot::channel::<()>();
+    let stalled_rx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(stalled_rx)));
+    let served = tokio::spawn(server::mux::serve(server_io, move |_stream| {
+        let stalled_rx = stalled_rx.clone();
+        async move {
+            // A handler still busy when the client vanishes must not keep the server up.
+            let rx = stalled_rx.lock().await.take().unwrap();
+            let _ = rx.await;
+        }
+    }));
+
+    let mut stream = handle.open_stream().await.unwrap();
+    stream.write_all(b"work").await.unwrap();
+    tokio::task::yield_now().await;
+    client_driver.abort();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), served)
+        .await
+        .expect("serve() kept running after the client vanished")
+        .unwrap()
+        .ok();
+    drop(stalled_tx);
 }

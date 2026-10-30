@@ -20,7 +20,7 @@ mux = ["dep:tokio", "dep:tokio-util", "dep:yamux", "dep:futures", "dep:thiserror
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 clap = { version = "4.6.7", features = ["derive"], optional = true }
 thiserror = { version = "2.0.21", optional = true }
-tokio = { version = "1.54.1", features = ["io-util", "io-std", "macros", "net", "process", "rt", "sync", "time"], optional = true }
+tokio = { version = "1.54.1", features = ["io-util", "io-std", "macros", "net", "process", "rt", "signal", "sync", "time"], optional = true }
 tokio-util = { version = "0.7.20", features = ["compat"], optional = true }
 tracing = { version = "0.1.44", optional = true }
 yamux = { version = "0.14.1", optional = true }

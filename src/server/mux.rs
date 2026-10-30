@@ -45,6 +45,27 @@ where
     )
 }
 
+/// Serves the client's streams over `io` — in a server, its joined stdin and stdout — running
+/// `handler` on its own task for each, until the client goes away. Returns the driver's outcome,
+/// for the server's exit status; the server then exits, which also releases anything handlers
+/// still hold open.
+pub async fn serve<T, F, Fut>(io: T, handler: F) -> Result<(), MuxError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    F: Fn(yamux::Stream) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let (mut acceptor, driver) = server(io);
+    // Handlers aren't awaited: once the client is gone there is no one to answer, and the server
+    // exiting is what releases whatever they still hold.
+    tokio::spawn(async move {
+        while let Some(stream) = acceptor.accept().await {
+            tokio::spawn(handler(stream));
+        }
+    });
+    driver.await
+}
+
 struct Driver<T> {
     connection: yamux::Connection<T>,
     accept_tx: tokio::sync::mpsc::UnboundedSender<yamux::Stream>,
@@ -86,11 +107,27 @@ where
                     }
                     continue;
                 }
+                Poll::Ready(Some(Err(e))) if client_is_gone(&e) => return Poll::Ready(Ok(())),
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(MuxError::Connection(e))),
-                Poll::Ready(None) => return Poll::Ready(Err(MuxError::Closed)),
+                // The client closed the connection: the normal end of a server's life.
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
                 Poll::Pending => return Poll::Pending,
             }
         }
+    }
+}
+
+/// Whether `e` only says the transport is gone — the client closed it, or its whole side went
+/// away — rather than that the client spoke wrongly. Either way the server's job is over, and an
+/// answer to a closed connection fails with exactly these.
+fn client_is_gone(e: &yamux::ConnectionError) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
+    match e {
+        yamux::ConnectionError::Closed => true,
+        yamux::ConnectionError::Io(e) => {
+            matches!(e.kind(), BrokenPipe | ConnectionReset | UnexpectedEof)
+        }
+        _ => false,
     }
 }
 

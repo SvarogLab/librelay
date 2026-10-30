@@ -16,6 +16,21 @@ pub enum Died {
     TransportEnded,
 }
 
+impl std::fmt::Display for Died {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Died::Exited(Ok(status)) => write!(f, "the server exited ({status})"),
+            Died::Exited(Err(e)) => {
+                write!(
+                    f,
+                    "the server is gone; its exit status couldn't be read: {e}"
+                )
+            }
+            Died::TransportEnded => write!(f, "the mux connection to the server ended"),
+        }
+    }
+}
+
 /// Resolves once the link to the server is gone: the server process exits, or `transport_ended`
 /// — whatever the relay's own protocol uses to notice a dead link — resolves first.
 pub async fn died(child: &mut Child, transport_ended: impl Future) -> Died {
@@ -34,6 +49,19 @@ pub enum NotAlive {
     },
     #[error("couldn't wait for the server: {0}")]
     Wait(#[from] std::io::Error),
+}
+
+/// Resolves on SIGTERM — what `systemctl stop` sends — or SIGINT, for the relay to shut down
+/// gracefully instead of being killed mid-request.
+pub async fn shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    tokio::select! {
+        _ = terminate.recv() => {}
+        _ = interrupt.recv() => {}
+    }
+    Ok(())
 }
 
 /// Waits out `within` and fails if the server exits during it. There's no positive health signal
@@ -84,6 +112,22 @@ mod tests {
             .await
             .expect("died() did not resolve after the transport ended");
         assert!(matches!(died, Died::TransportEnded));
+    }
+
+    #[tokio::test]
+    async fn died_says_how_the_link_was_lost() {
+        let mut child = spawn("exit 3");
+        let exited = died(&mut child, std::future::pending::<()>()).await;
+        assert_eq!(exited.to_string(), "the server exited (exit status: 3)");
+        assert_eq!(
+            Died::TransportEnded.to_string(),
+            "the mux connection to the server ended"
+        );
+        let unreadable = Died::Exited(Err(std::io::Error::other("no such process")));
+        assert_eq!(
+            unreadable.to_string(),
+            "the server is gone; its exit status couldn't be read: no such process"
+        );
     }
 
     #[tokio::test]

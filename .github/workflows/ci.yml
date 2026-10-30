@@ -1,0 +1,36 @@
+# The crate is checked on Linux with every feature, and on Windows with the server side, the only
+# one that builds there. A merged `chore: release vX` commit is tagged and released; consumers pin
+# that tag as a git dependency.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    uses: SvarogLab/.github/.github/workflows/rust.yml@v1
+    with:
+      windows-args: --no-default-features --features server
+
+  tag:
+    needs: rust
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: SvarogLab/.github/.github/workflows/tag-release.yml@v1
+    permissions:
+      contents: write
+
+  release:
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    uses: SvarogLab/.github/.github/workflows/release.yml@v1
+    permissions:
+      contents: write
+    with:
+      tag: ${{ needs.tag.outputs.tag }}

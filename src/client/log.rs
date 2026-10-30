@@ -59,6 +59,14 @@ pub fn init(filter: LogFilter) {
 /// diagnostics can share the journal and still be told apart.
 pub const SERVER_LINE_PREFIX: &str = "server: ";
 
+/// Windows processes may end lines with `\r\n`; the journal wants `\n` alone.
+fn server_line(raw: &[u8]) -> String {
+    let line = String::from_utf8_lossy(raw);
+    let line = line.strip_suffix('\n').unwrap_or(&line);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    format!("{SERVER_LINE_PREFIX}{line}\n")
+}
+
 /// Copies the server's stderr into `out` line by line, each line prefixed with
 /// [`SERVER_LINE_PREFIX`], until the server closes it. The line itself is passed through as the
 /// server wrote it — its own `tracing` setup already formatted it — apart from a trailing `\r`,
@@ -74,14 +82,9 @@ pub async fn forward_server_stderr(
         match server_stderr.read_until(b'\n', &mut raw).await {
             Ok(0) | Err(_) => return,
             Ok(_) => {
-                let line = String::from_utf8_lossy(&raw);
-                let line = line.strip_suffix('\n').unwrap_or(&line);
-                let line = line.strip_suffix('\r').unwrap_or(line);
                 // One write per line, flushed, so a line reaches the journal whole and can't
                 // interleave with the client's own output.
-                let _ = out
-                    .write_all(format!("{SERVER_LINE_PREFIX}{line}\n").as_bytes())
-                    .await;
+                let _ = out.write_all(server_line(&raw).as_bytes()).await;
                 let _ = out.flush().await;
             }
         }
@@ -120,6 +123,17 @@ mod tests {
     fn passes_the_filter_to_the_server_under_its_flag() {
         let filter = LogFilter::parse(Some("debug".to_string())).unwrap();
         assert_eq!(filter.server_args(), [crate::LOG_FILTER_FLAG, "debug"]);
+    }
+
+    #[test]
+    fn a_server_line_gets_the_prefix_and_loses_its_line_ending() {
+        assert_eq!(server_line(b"started\r\n"), "server: started\n");
+        assert_eq!(server_line(b"started\n"), "server: started\n");
+        assert_eq!(
+            server_line(b"last, unterminated"),
+            "server: last, unterminated\n"
+        );
+        assert_eq!(server_line(b"\xffbyte"), "server: \u{fffd}byte\n");
     }
 
     #[tokio::test]

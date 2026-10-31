@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -26,29 +26,37 @@ impl Server {
     /// The spawn runs on the blocking pool: starting a Windows process from WSL can hang inside
     /// the spawn call itself (microsoft/WSL#7371), and there it stalls one blocking thread rather
     /// than an async worker.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError`] if the process can't be started.
     pub async fn spawn(
         path: PathBuf,
         args: impl IntoIterator<Item = String>,
     ) -> Result<Self, SpawnError> {
         let args: Vec<String> = args.into_iter().collect();
-        tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(&path)
-                .args(&args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|source| SpawnError { path, source })?;
-            Ok(Self {
-                stdin: child.stdin.take().expect("stdin is piped"),
-                stdout: child.stdout.take().expect("stdout is piped"),
-                stderr: child.stderr.take().expect("stderr is piped"),
-                child,
-            })
+        let command = path.clone();
+        tokio::task::spawn_blocking(move || Self::spawn_blocking(&command, &args))
+            .await
+            .map_err(io::Error::other)
+            .and_then(|spawned| spawned)
+            .map_err(|source| SpawnError { path, source })
+    }
+
+    fn spawn_blocking(path: &Path, args: &[String]) -> io::Result<Self> {
+        let mut child = Command::new(path)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        Ok(Self {
+            stdin: child.stdin.take().expect("stdin is piped"),
+            stdout: child.stdout.take().expect("stdout is piped"),
+            stderr: child.stderr.take().expect("stderr is piped"),
+            child,
         })
-        .await
-        .expect("the spawn task doesn't panic")
     }
 }
 

@@ -16,22 +16,16 @@ fn parse_log_filter(value: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Logs to stderr, colored only on a terminal. Off a terminal, stderr is the client's pipe and
-/// the journal stamps every line, so the server's own timestamp is left out.
+/// Logs to stderr: colored and timestamped on a terminal, plain lines for the client to forward
+/// otherwise.
+///
+/// # Panics
+///
+/// If logging is already set up in this process.
 pub fn init(args: &LogArgs) {
-    use std::io::IsTerminal;
     let filter = tracing_subscriber::EnvFilter::try_new(&args.filter)
         .expect("--log-filter is validated while parsing");
-    let on_terminal = std::io::stderr().is_terminal();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_ansi(on_terminal)
-        .with_env_filter(filter);
-    if on_terminal {
-        subscriber.init();
-    } else {
-        subscriber.without_time().init();
-    }
+    crate::log::init_stderr(filter);
 }
 
 #[cfg(test)]

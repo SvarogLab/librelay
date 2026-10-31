@@ -104,9 +104,9 @@ Both processes log to the client's stderr, which systemd sends to the journal:
   to the server as `--log-filter`, a required server flag.
 - Every line the server writes to its stderr is forwarded with a `server:` prefix followed by a
   space, and otherwise as the server wrote it, apart from a trailing carriage return.
-- The server leaves out its own timestamp when its stderr isn't a terminal — which it never is when
-  the client spawns it — since the journal timestamps every line.
-- Output is colored only when stderr is a terminal.
+- On a terminal, both processes color and timestamp their lines. Otherwise — the client's stderr
+  under systemd, the server's whenever the client spawns it — the journal timestamps every line, so
+  neither adds a timestamp or color of its own.
 
 ## Testing
 

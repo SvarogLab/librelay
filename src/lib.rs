@@ -7,6 +7,8 @@
 
 #[cfg(all(feature = "client", unix))]
 pub mod client;
+#[cfg(any(all(feature = "client", unix), feature = "server"))]
+mod log;
 #[cfg(feature = "mux")]
 pub mod mux;
 #[cfg(feature = "server")]

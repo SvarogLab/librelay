@@ -1,9 +1,7 @@
 use std::future::{Future, poll_fn};
 use std::task::{Context, Poll};
 
-use tokio_util::compat::TokioAsyncReadCompatExt;
-
-use crate::mux::MuxError;
+use crate::mux::{self as shared, MuxError};
 
 /// Hands out inbound yamux streams as the client opens them, one per unit of work the relay
 /// carries — a relayed connection, a request.
@@ -19,17 +17,15 @@ impl MuxAcceptor {
     }
 }
 
-/// Builds a server-mode mux over `io` (the process's own joined stdin/stdout, or any other duplex
-/// transport — see the tests below, which use `tokio::io::duplex`). Returns an acceptor plus the
-/// driver future, which the caller must poll to completion (e.g. via `tokio::spawn`) for the
-/// connection to make any progress — this is what actually reads/writes the underlying transport,
-/// and its completion is how the server learns the client is gone.
+/// Builds the server end of a mux over `io`, the process's joined stdin and stdout.
+///
+/// Returns the acceptor and the driver, which must be polled to completion (see
+/// [`shared::connection`]); the driver's end is how the server learns the client is gone.
 pub fn server<T>(io: T) -> (MuxAcceptor, impl Future<Output = Result<(), MuxError>>)
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let connection =
-        yamux::Connection::new(io.compat(), yamux::Config::default(), yamux::Mode::Server);
+    let connection = shared::connection(io, yamux::Mode::Server);
     // Unbounded: yamux itself already caps the number of live streams per connection (default
     // 512, see `yamux::Config`), so there's a natural upper bound on outstanding items without
     // needing bounded-channel backpressure logic here too.
@@ -45,10 +41,16 @@ where
     )
 }
 
-/// Serves the client's streams over `io` — in a server, its joined stdin and stdout — running
-/// `handler` on its own task for each, until the client goes away. Returns the driver's outcome,
-/// for the server's exit status; the server then exits, which also releases anything handlers
-/// still hold open.
+/// Serves the client's streams over `io`, the server's joined stdin and stdout, running `handler`
+/// on its own task for each, until the client goes away.
+///
+/// The server is meant to exit once this returns, which also releases anything handlers still
+/// hold open.
+///
+/// # Errors
+///
+/// The connection's error if the client spoke the protocol wrongly; a client that closed the
+/// connection or vanished ends it with `Ok`.
 pub async fn serve<T, F, Fut>(io: T, handler: F) -> Result<(), MuxError>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -76,36 +78,18 @@ impl<T> Driver<T>
 where
     T: futures::AsyncRead + futures::AsyncWrite + Unpin,
 {
-    /// Drives the connection by continuously polling `poll_next_inbound` — as with the client
-    /// side, this is not optional bookkeeping, it's the only thing that flushes/receives frames at
-    /// all (yamux 0.14 has no separate background task or `Control`/`next_stream()` API — driving
-    /// the connection *is* what makes progress). Every accepted stream is forwarded to the
-    /// `MuxAcceptor`; once that's dropped, there's no one left to hand streams to, so the
-    /// connection is wound down gracefully instead of accepting forever.
     fn poll_drive(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), MuxError>> {
-        if self.closing {
-            return self.connection.poll_close(cx).map_err(MuxError::Connection);
+        // An unbounded sender can't wake this driver when the acceptor goes, so a dropped acceptor
+        // is noticed at the next poll; the caller watches the driver's own end, not this.
+        if self.closing || self.accept_tx.is_closed() {
+            return self.poll_close(cx);
         }
-
-        // Checked unconditionally, not just when a send fails: unlike `UnboundedReceiver`,
-        // `UnboundedSender` has no waker-registering "wait until closed" primitive, so this only
-        // detects a dropped acceptor at the next moment this future happens to get polled anyway
-        // (e.g. an idle connection with no traffic at all won't notice a dropped acceptor until
-        // *something* wakes it — acceptable here since this is best-effort local cleanup, not the
-        // liveness detection that matters: that's the caller watching this driver's completion).
-        if self.accept_tx.is_closed() {
-            self.closing = true;
-            return self.connection.poll_close(cx).map_err(MuxError::Connection);
-        }
-
         loop {
             match self.connection.poll_next_inbound(cx) {
                 Poll::Ready(Some(Ok(stream))) => {
                     if self.accept_tx.send(stream).is_err() {
-                        self.closing = true;
-                        return self.connection.poll_close(cx).map_err(MuxError::Connection);
+                        return self.poll_close(cx);
                     }
-                    continue;
                 }
                 Poll::Ready(Some(Err(e))) if client_is_gone(&e) => return Poll::Ready(Ok(())),
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(MuxError::Connection(e))),
@@ -114,6 +98,12 @@ where
                 Poll::Pending => return Poll::Pending,
             }
         }
+    }
+
+    /// With no acceptor left there is no one to hand streams to, so the connection winds down.
+    fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), MuxError>> {
+        self.closing = true;
+        self.connection.poll_close(cx).map_err(MuxError::Connection)
     }
 }
 
@@ -135,23 +125,13 @@ fn client_is_gone(e: &yamux::ConnectionError) -> bool {
 mod tests {
     use super::*;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
-    use std::future::Future as StdFuture;
-    use std::pin::Pin;
 
-    fn spawn_driver(
-        driver: impl StdFuture<Output = Result<(), MuxError>> + Send + 'static,
-    ) -> tokio::task::JoinHandle<Result<(), MuxError>> {
-        tokio::spawn(Box::pin(driver) as Pin<Box<dyn StdFuture<Output = _> + Send>>)
-    }
-
-    /// A minimal `Mode::Client` counterpart, so these tests don't depend on `client::mux`, which
-    /// only builds on unix.
+    /// A minimal client end, so these tests don't depend on `client::mux`, which only builds on
+    /// unix.
     ///
-    /// Mirrors the shape of the real `Driver` in this file: `poll_new_outbound` alone only
-    /// registers local bookkeeping for a new stream, it does **not** flush anything to the wire.
-    /// Only `poll_next_inbound` actually sends/receives frames, so without a driving loop every
-    /// write on the resulting stream hangs. Both `poll_new_outbound` and `poll_next_inbound` need `&mut Connection`, so — same as the real `Driver` — they're
-    /// interleaved from a single task via one `poll_fn`, not two competing futures.
+    /// `poll_new_outbound` only books a stream; frames move only while `poll_next_inbound` is
+    /// polled. Both need `&mut Connection`, so one `poll_fn` interleaves them, as the client's
+    /// driver does.
     struct BareClient {
         open_tx: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<yamux::Stream>>,
     }
@@ -168,8 +148,7 @@ mod tests {
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let mut connection =
-            yamux::Connection::new(io.compat(), yamux::Config::default(), yamux::Mode::Client);
+        let mut connection = shared::connection(io, yamux::Mode::Client);
         let (open_tx, mut open_rx) =
             tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<yamux::Stream>>();
 
@@ -196,7 +175,7 @@ mod tests {
                         }
                     }
                     match connection.poll_next_inbound(cx) {
-                        Poll::Ready(Some(_)) => continue,
+                        Poll::Ready(Some(_)) => {}
                         Poll::Ready(None) => return Poll::Ready(()),
                         Poll::Pending => return Poll::Pending,
                     }
@@ -212,7 +191,7 @@ mod tests {
     async fn accept_relays_a_stream_end_to_end_in_both_directions() {
         let (server_io, client_io) = tokio::io::duplex(64 * 1024);
         let (mut acceptor, driver) = server(server_io);
-        spawn_driver(driver);
+        tokio::spawn(driver);
         let bare_client = spawn_bare_client(client_io);
 
         let mut client_stream = bare_client.open_stream().await;
@@ -234,7 +213,7 @@ mod tests {
     async fn accept_hands_out_independent_streams_one_at_a_time() {
         let (server_io, client_io) = tokio::io::duplex(64 * 1024);
         let (mut acceptor, driver) = server(server_io);
-        spawn_driver(driver);
+        tokio::spawn(driver);
         let bare_client = spawn_bare_client(client_io);
 
         for i in 0..4u32 {

@@ -6,7 +6,8 @@
 pub struct LogArgs {
     /// `tracing` filter for this process's diagnostics, in `RUST_LOG` syntax. A flag rather than
     /// `RUST_LOG` itself, since environment variables don't cross the WSL interop boundary.
-    #[arg(long = "log-filter", value_parser = parse_log_filter)]
+    // A filter the client accepts may start with a hyphen, and must not read as a flag here.
+    #[arg(long = "log-filter", value_parser = parse_log_filter, allow_hyphen_values = true)]
     pub filter: String,
 }
 
@@ -50,6 +51,18 @@ mod tests {
             Config::try_parse_from(["relay-server", crate::LOG_FILTER_FLAG, "debug,yamux=warn"])
                 .unwrap();
         assert_eq!(config.log.filter, "debug,yamux=warn");
+    }
+
+    /// The client accepts these as filters, so the server must not take them for flags.
+    #[cfg(all(feature = "client", unix))]
+    #[test]
+    fn takes_a_filter_that_starts_with_a_hyphen() {
+        for filter in ["--", "-x"] {
+            let client = crate::client::log::LogFilter::parse(Some(filter.to_string())).unwrap();
+            let args = std::iter::once("relay-server".to_string()).chain(client.server_args());
+            let config = Config::try_parse_from(args).unwrap();
+            assert_eq!(config.log.filter, filter);
+        }
     }
 
     #[test]

@@ -6,8 +6,8 @@ stdout, so a Linux application can reach something that only exists on Windows: 
 Credential Manager. [`sockrelay`](https://github.com/SvarogLab/sockrelay) and
 [`credrelay`](https://github.com/SvarogLab/credrelay) are built on it.
 
-Spawning the server once matters: starting a Windows process through WSL interop takes around
-80 ms, which a relay that started one per request would add to every request.
+Spawning the server once matters: starting a Windows process through WSL interop took around 80 ms
+on a test machine, which a relay that started one per request would add to every request.
 
 ## Architecture
 

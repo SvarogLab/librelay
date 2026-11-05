@@ -12,8 +12,8 @@ pub struct LogArgs {
 }
 
 fn parse_log_filter(value: &str) -> Result<String, String> {
-    tracing_subscriber::EnvFilter::try_new(value)
-        .map(|_| value.to_string())
+    crate::log::parse_filter(value)
+        .map(|(directives, _)| directives)
         .map_err(|e| e.to_string())
 }
 
@@ -63,6 +63,15 @@ mod tests {
             let config = Config::try_parse_from(args).unwrap();
             assert_eq!(config.log.filter, filter);
         }
+    }
+
+    #[test]
+    fn whitespace_around_a_directive_is_not_part_of_it() {
+        let args = ["relay-server", crate::LOG_FILTER_FLAG, "info, ü=warn"];
+        assert_eq!(
+            Config::try_parse_from(args).unwrap().log.filter,
+            "info,ü=warn"
+        );
     }
 
     #[test]

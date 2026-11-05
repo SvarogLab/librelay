@@ -21,9 +21,10 @@ fuzz_target!(|server_stderr: &[u8]| {
             .strip_prefix(SERVER_LINE_PREFIX)
             .and_then(|line| line.strip_suffix('\n'))
             .unwrap_or_else(|| panic!("not a marked, terminated line: {forwarded:?}"));
-        assert!(!text.ends_with(['\r', '\n']), "{forwarded:?}");
-        assert!(
-            String::from_utf8_lossy(written).starts_with(text),
+        let written = String::from_utf8_lossy(written);
+        assert_eq!(
+            text,
+            written.trim_end_matches(['\r', '\n']),
             "{forwarded:?}"
         );
     }

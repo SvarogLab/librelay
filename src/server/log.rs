@@ -6,13 +6,14 @@
 pub struct LogArgs {
     /// `tracing` filter for this process's diagnostics, in `RUST_LOG` syntax. A flag rather than
     /// `RUST_LOG` itself, since environment variables don't cross the WSL interop boundary.
-    #[arg(long = "log-filter", value_parser = parse_log_filter)]
+    // A filter the client accepts may start with a hyphen, and must not read as a flag here.
+    #[arg(long = "log-filter", value_parser = parse_log_filter, allow_hyphen_values = true)]
     pub filter: String,
 }
 
 fn parse_log_filter(value: &str) -> Result<String, String> {
-    tracing_subscriber::EnvFilter::try_new(value)
-        .map(|_| value.to_string())
+    crate::log::parse_filter(value)
+        .map(|(directives, _)| directives)
         .map_err(|e| e.to_string())
 }
 
@@ -23,8 +24,8 @@ fn parse_log_filter(value: &str) -> Result<String, String> {
 ///
 /// If logging is already set up in this process.
 pub fn init(args: &LogArgs) {
-    let filter = tracing_subscriber::EnvFilter::try_new(&args.filter)
-        .expect("--log-filter is validated while parsing");
+    let (_, filter) =
+        crate::log::parse_filter(&args.filter).expect("--log-filter is validated while parsing");
     crate::log::init_stderr(filter);
 }
 
@@ -50,6 +51,24 @@ mod tests {
             Config::try_parse_from(["relay-server", crate::LOG_FILTER_FLAG, "debug,yamux=warn"])
                 .unwrap();
         assert_eq!(config.log.filter, "debug,yamux=warn");
+    }
+
+    /// The client accepts these as filters, so the server must not take them for flags.
+    #[test]
+    fn takes_a_filter_that_starts_with_a_hyphen() {
+        for filter in ["--", "-x"] {
+            let args = ["relay-server", crate::LOG_FILTER_FLAG, filter];
+            assert_eq!(Config::try_parse_from(args).unwrap().log.filter, filter);
+        }
+    }
+
+    #[test]
+    fn whitespace_around_a_directive_is_not_part_of_it() {
+        let args = ["relay-server", crate::LOG_FILTER_FLAG, "info, ü=warn"];
+        assert_eq!(
+            Config::try_parse_from(args).unwrap().log.filter,
+            "info,ü=warn"
+        );
     }
 
     #[test]

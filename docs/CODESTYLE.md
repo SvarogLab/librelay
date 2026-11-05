@@ -35,6 +35,11 @@ behavior they hold.
   `From` impl or a `#[source]` field, not by stringifying.
 - `unwrap` belongs in tests. Elsewhere, an `expect` states the invariant that makes it unreachable.
 
+## Tests
+
+What a process can set up only once — signal handlers, the global log subscriber, its environment —
+is tested in a `tests/` file of its own, which runs as a process of its own.
+
 ## Comments
 
 Code says what it does; a comment says why, when the reason lives outside the code: a quirk of

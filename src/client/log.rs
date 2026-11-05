@@ -4,7 +4,7 @@
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tracing_subscriber::EnvFilter;
 
-/// The `tracing` filter both processes log with: `RUST_LOG` when set and non-empty, `info`
+/// The `tracing` filter both processes log with: `RUST_LOG` when it holds any directive, `info`
 /// otherwise.
 ///
 /// Validated once, here, so a typo is reported by the process that read it rather than making the
@@ -35,10 +35,11 @@ impl LogFilter {
     ///
     /// [`LogFilterError`] if `rust_log` isn't a valid filter.
     pub fn parse(rust_log: Option<String>) -> Result<Self, LogFilterError> {
-        let directives = rust_log
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "info".to_string());
-        let env_filter = EnvFilter::try_new(&directives)?;
+        let (directives, env_filter) =
+            match crate::log::parse_filter(rust_log.as_deref().unwrap_or_default())? {
+                (directives, _) if directives.is_empty() => crate::log::parse_filter("info")?,
+                parsed => parsed,
+            };
         Ok(Self {
             directives,
             env_filter,
@@ -123,6 +124,17 @@ mod tests {
         assert_eq!(LogFilter::parse(None).unwrap().as_str(), "info");
         assert_eq!(
             LogFilter::parse(Some(String::new())).unwrap().as_str(),
+            "info"
+        );
+    }
+
+    /// Written with a space after each comma, as people do, it must still name the same targets.
+    #[test]
+    fn whitespace_around_a_directive_is_not_part_of_it() {
+        let filter = LogFilter::parse(Some("info, relay=debug ,ü=warn".to_string())).unwrap();
+        assert_eq!(filter.as_str(), "info,relay=debug,ü=warn");
+        assert_eq!(
+            LogFilter::parse(Some(" , ".to_string())).unwrap().as_str(),
             "info"
         );
     }

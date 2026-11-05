@@ -228,9 +228,12 @@ mod tests {
         }
     }
 
+    /// yamux's frame type for "this connection is going away".
+    const GO_AWAY: u8 = 3;
+
     #[tokio::test]
-    async fn driver_shuts_down_once_the_acceptor_is_dropped() {
-        let (server_io, _client_io) = tokio::io::duplex(64 * 1024);
+    async fn dropping_the_acceptor_tells_the_client_the_connection_is_going_away() {
+        let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
         let (acceptor, driver) = server(server_io);
 
         drop(acceptor);
@@ -239,5 +242,35 @@ mod tests {
             .await
             .expect("driver did not shut down after the acceptor was dropped")
             .unwrap();
+        let mut sent = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut client_io, &mut sent)
+            .await
+            .unwrap();
+        assert_eq!(sent.get(1), Some(&GO_AWAY), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn a_client_speaking_something_other_than_yamux_is_an_error() {
+        let io = tokio::io::join(&b"not a yamux frame"[..], tokio::io::sink());
+        let served = serve(io, |_stream| async {}).await;
+        assert!(matches!(served, Err(MuxError::Connection(_))), "{served:?}");
+    }
+
+    #[test]
+    fn only_a_closed_or_broken_transport_means_the_client_is_gone() {
+        use std::io::{Error, ErrorKind};
+        use yamux::ConnectionError::{Closed, Io, TooManyStreams};
+        assert!(client_is_gone(&Closed));
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::UnexpectedEof,
+        ] {
+            assert!(client_is_gone(&Io(Error::from(kind))), "{kind:?}");
+        }
+        assert!(!client_is_gone(&Io(Error::from(
+            ErrorKind::PermissionDenied
+        ))));
+        assert!(!client_is_gone(&TooManyStreams));
     }
 }

@@ -3,6 +3,7 @@
 use std::io::IsTerminal;
 
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::ParseError;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -12,6 +13,19 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// Records of the `log` crate, which yamux logs through, are bridged in too.
 pub(crate) fn init_stderr(filter: EnvFilter) {
     subscriber(filter, std::io::stderr().is_terminal(), std::io::stderr).init();
+}
+
+/// Parses a filter in `RUST_LOG` syntax, returning it as parsed: each directive trimmed, the empty
+/// ones dropped.
+pub(crate) fn parse_filter(filter: &str) -> Result<(String, EnvFilter), ParseError> {
+    let directives = filter
+        .split(',')
+        .map(str::trim)
+        .filter(|directive| !directive.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    let env_filter = EnvFilter::try_new(&directives)?;
+    Ok((directives, env_filter))
 }
 
 fn subscriber<W>(

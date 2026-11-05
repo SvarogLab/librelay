@@ -155,12 +155,13 @@ mod tests {
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().unwrap();
-        let mut started = [0; 1];
+        let mut started = [0; b"started\n".len()];
         let mut stdout = child.stdout.take().unwrap();
         tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut started))
             .await
             .expect("the server did not start")
-            .unwrap();
+            .expect("couldn't read the server's start-up marker");
+        assert_eq!(&started, b"started\n");
         let transport_ends = async { drop(stdin) };
         let died = tokio::time::timeout(Duration::from_secs(5), died(&mut child, transport_ends))
             .await

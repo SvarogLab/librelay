@@ -39,8 +39,8 @@ impl MuxHandle {
     }
 }
 
-/// One outbound stream: a `yamux::Stream`, except that one closed before anything was written to it
-/// ends at once on this side.
+/// One outbound stream: a `yamux::Stream`, except that one closed before any write ends at once on
+/// this side.
 ///
 /// yamux 0.14 opens a stream on the wire with its first data frame, and closing a stream that never
 /// sent one doesn't open it either: the server never hears of it, and a read waiting for the
@@ -71,9 +71,8 @@ impl futures::AsyncWrite for Stream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let written = Pin::new(&mut self.inner).poll_write(cx, buf);
-        if let Poll::Ready(Ok(n)) = written
-            && n > 0
-        {
+        // Even an empty write goes out as a data frame, and opens the stream.
+        if let Poll::Ready(Ok(_)) = written {
             self.sent = true;
         }
         written

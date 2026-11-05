@@ -134,3 +134,29 @@ async fn a_stream_closed_before_any_data_still_ends() {
     .await
     .expect("a stream closed before sending anything never ended");
 }
+
+/// yamux sends even an empty write as a data frame, which opens the stream on the wire; closing it
+/// then has to reach the server too, or its handler waits on a stream that never ends.
+#[tokio::test]
+async fn a_stream_closed_after_an_empty_write_ends_on_the_server() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (handle, client_driver) = client::mux::client(client_io);
+    let (mut acceptor, server_driver) = server::mux::server(server_io);
+    tokio::spawn(client_driver);
+    tokio::spawn(server_driver);
+
+    let mut stream = handle.open_stream().await.unwrap();
+    assert_eq!(stream.write(b"").await.unwrap(), 0);
+    stream.close().await.unwrap();
+
+    let mut accepted = acceptor.accept().await.expect("stream was not accepted");
+    let mut request = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        accepted.read_to_end(&mut request),
+    )
+    .await
+    .expect("the server never saw the stream end")
+    .unwrap();
+    assert!(request.is_empty());
+}

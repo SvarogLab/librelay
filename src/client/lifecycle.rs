@@ -144,8 +144,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_transport_that_ends_as_the_server_exits_reports_the_exit_status() {
-        let mut child = spawn("sleep 0.1; exit 4");
-        let died = tokio::time::timeout(Duration::from_secs(5), died(&mut child, async {}))
+        use tokio::io::AsyncReadExt;
+        // The server exits only once the transport has ended, and has started before that, so
+        // EXIT_STATUS_WAIT covers its exit and not its start-up.
+        let mut child = Command::new("sh")
+            .args(["-c", "echo started; cat >/dev/null; exit 4"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut started = [0; 1];
+        let mut stdout = child.stdout.take().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut started))
+            .await
+            .expect("the server did not start")
+            .unwrap();
+        let transport_ends = async { drop(stdin) };
+        let died = tokio::time::timeout(Duration::from_secs(5), died(&mut child, transport_ends))
             .await
             .expect("died() did not resolve");
         match died {

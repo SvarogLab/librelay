@@ -1,9 +1,0 @@
-# Inside the build directory, which is ignored already.
-output = "target"
-
-# Mutants no test can tell from the real code, each with the reason.
-exclude_re = [
-    # A yamux stream's flush only waits for room in yamux's own queue to the connection, which
-    # sends the frames either way, and reports a closed queue as flushed.
-    "replace <impl futures::AsyncWrite for Stream>::poll_flush",
-]

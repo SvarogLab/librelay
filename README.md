@@ -128,6 +128,37 @@ cargo clippy --all-targets --all-features --target aarch64-pc-windows-msvc -- -D
 
 (`cargo xwin env` sets the target's runner to `wine`, which isn't needed here, so it is unset.)
 
+Every test has to be able to fail. [`cargo-mutants`](https://mutants.rs) checks that by breaking
+the code one change at a time, and must report no mutant missed:
+
+```sh
+cargo install cargo-mutants
+cargo mutants --workspace
+```
+
+[`.cargo/mutants.toml`](.cargo/mutants.toml) keeps its output in `target/` and lists the few
+mutants no test can tell from the real code, each with the reason.
+
+What reaches the relay from outside its process is fuzzed, with
+[`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on a nightly toolchain:
+
+```sh
+rustup toolchain install nightly
+cargo install cargo-fuzz
+fuzz/run.sh mux_server_stdin 300
+```
+
+`fuzz/run.sh <target> [seconds]` keeps the corpus and any crash in `target/fuzz/`. Each target
+asserts a property, not just the absence of a crash:
+
+| Target | Input | Property |
+| --- | --- | --- |
+| `mux_server_stdin` | the server's stdin | `serve` ends, with `Ok` or a connection error |
+| `server_stderr_lines` | the server's stderr | each line is forwarded once, marked, and otherwise intact |
+| `log_filter_agreement` | `RUST_LOG` | the server accepts exactly the filters the client does, unchanged |
+
+A crash found this way becomes a unit test in the crate.
+
 ### Releasing
 
 Run the **Release PR** workflow from the Actions tab. It opens `chore: release vX.Y.Z` with the

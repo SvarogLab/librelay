@@ -35,6 +35,18 @@ behavior they hold.
   `From` impl or a `#[source]` field, not by stringifying.
 - `unwrap` belongs in tests. Elsewhere, an `expect` states the invariant that makes it unreachable.
 
+## Tests
+
+- Every test must be able to fail: `cargo mutants --workspace` reports no mutant missed. A mutant
+  no test can tell from the real code goes into `exclude_re` in `.cargo/mutants.toml`, with a
+  comment giving the reason; nothing in the code marks it.
+- A test no mutant needs stays only if its doc comment names the behavior it holds: a documented
+  promise, or a contract of the OS, of WSL or of systemd.
+- What a process can set up only once — signal handlers, the global log subscriber, its
+  environment — is tested in a `tests/` file of its own, which runs as a process of its own.
+- Every parser of bytes from outside the process has a fuzz target in `fuzz/`, asserting a
+  property. A crash it finds becomes a unit test.
+
 ## Comments
 
 Code says what it does; a comment says why, when the reason lives outside the code: a quirk of

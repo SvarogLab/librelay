@@ -35,11 +35,11 @@ impl LogFilter {
     ///
     /// [`LogFilterError`] if `rust_log` isn't a valid filter.
     pub fn parse(rust_log: Option<String>) -> Result<Self, LogFilterError> {
-        let mut parsed = crate::log::parse_filter(rust_log.as_deref().unwrap_or_default())?;
-        if parsed.0.is_empty() {
-            parsed = crate::log::parse_filter("info")?;
-        }
-        let (directives, env_filter) = parsed;
+        let (directives, env_filter) =
+            match crate::log::parse_filter(rust_log.as_deref().unwrap_or_default())? {
+                (directives, _) if directives.is_empty() => crate::log::parse_filter("info")?,
+                parsed => parsed,
+            };
         Ok(Self {
             directives,
             env_filter,

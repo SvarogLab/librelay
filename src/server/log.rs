@@ -24,8 +24,8 @@ fn parse_log_filter(value: &str) -> Result<String, String> {
 ///
 /// If logging is already set up in this process.
 pub fn init(args: &LogArgs) {
-    let filter = tracing_subscriber::EnvFilter::try_new(&args.filter)
-        .expect("--log-filter is validated while parsing");
+    let (_, filter) =
+        crate::log::parse_filter(&args.filter).expect("--log-filter is validated while parsing");
     crate::log::init_stderr(filter);
 }
 
@@ -54,14 +54,11 @@ mod tests {
     }
 
     /// The client accepts these as filters, so the server must not take them for flags.
-    #[cfg(all(feature = "client", unix))]
     #[test]
     fn takes_a_filter_that_starts_with_a_hyphen() {
         for filter in ["--", "-x"] {
-            let client = crate::client::log::LogFilter::parse(Some(filter.to_string())).unwrap();
-            let args = std::iter::once("relay-server".to_string()).chain(client.server_args());
-            let config = Config::try_parse_from(args).unwrap();
-            assert_eq!(config.log.filter, filter);
+            let args = ["relay-server", crate::LOG_FILTER_FLAG, filter];
+            assert_eq!(Config::try_parse_from(args).unwrap().log.filter, filter);
         }
     }
 

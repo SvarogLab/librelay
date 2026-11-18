@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-11-18
+
+### CI/CD ⚙️
+
+- Move shared workflows to v2.1 (#17)
+- Open the release PR as the organisation's ci app (#19)
+
 ## [0.1.2] - 2026-11-11
 
 ### Build system 🛠️
